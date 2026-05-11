@@ -53,20 +53,15 @@ namespace NavalBuffetMod
                 if (__instance == null || __instance.gameObject == null) return;
                 
                 string objName = __instance.gameObject.name;
-                string matchedTarget = null;
                 
-                foreach (var target in Plugin.Configs.Keys)
+                foreach (var kvp in Plugin.Configs)
                 {
-                    if (objName.Contains(target))
+                    if (objName.Contains(kvp.Key))
                     {
-                        matchedTarget = target;
-                        break;
+                        Plugin.Log.LogInfo($"[NavalBuffetMod] New Rearmer detected: '{objName}'. Initializing...");
+                        // We rely on RearmingCheck to apply the initial config values.
+                        break; 
                     }
-                }
-
-                if (matchedTarget != null)
-                {
-                    Plugin.Log.LogInfo($"[Wiretap] Found TARGET Rearmer on GameObject: '{objName}' | Initial config will be applied.");
                 }
             }
             catch (Exception ex)
@@ -86,48 +81,60 @@ namespace NavalBuffetMod
                 if (__instance == null || __instance.gameObject == null) return;
                 
                 string objName = __instance.gameObject.name;
-                string matchedTarget = null;
                 
-                foreach (var target in Plugin.Configs.Keys)
+                foreach (var kvp in Plugin.Configs)
                 {
-                    if (objName.Contains(target))
+                    if (objName.Contains(kvp.Key))
                     {
-                        matchedTarget = target;
-                        break;
-                    }
-                }
+                        var config = kvp.Value;
+                        var traverse = Traverse.Create(__instance);
+                        
+                        float currentRange = traverse.Field<float>("range").Value;
+                        bool currentSingleUse = traverse.Field<bool>("singleUse").Value;
+                        bool targetSingleUse = !config.Replenishable.Value;
 
-                if (matchedTarget != null)
-                {
-                    var traverse = Traverse.Create(__instance);
-                    var config = Plugin.Configs[matchedTarget];
-                    
-                    traverse.Field("singleUse").SetValue(!config.Replenishable.Value);
-                    traverse.Field("range").SetValue(config.Radius.Value);
-                    
-                    // Update all physical trigger colliders in the object hierarchy
-                    foreach (var collider in __instance.GetComponentsInChildren<Collider>(true))
-                    {
-                        if (collider.isTrigger)
+                        // PERFORMANCE OPTIMIZATION: Only perform heavy physical updates if the configuration has changed
+                        // or if this is the first time we're applying it.
+                        if (Mathf.Abs(currentRange - config.Radius.Value) > 0.1f || currentSingleUse != targetSingleUse)
                         {
-                            if (collider is SphereCollider sc)
+                            Plugin.Log.LogInfo($"[NavalBuffetMod] Updating {objName}: Radius {config.Radius.Value}, Replenishable {config.Replenishable.Value}");
+
+                            traverse.Field("singleUse").SetValue(targetSingleUse);
+                            traverse.Field("range").SetValue(config.Radius.Value);
+
+                            foreach (var collider in __instance.GetComponentsInChildren<Collider>(true))
                             {
-                                sc.radius = config.Radius.Value;
-                            }
-                            else if (collider is CapsuleCollider cc)
-                            {
-                                cc.radius = config.Radius.Value;
-                            }
-                            else if (collider is BoxCollider bc)
-                            {
-                                // If it's a box collider trigger, scale the size to encompass the radius
-                                bc.size = new Vector3(config.Radius.Value * 2, config.Radius.Value * 2, config.Radius.Value * 2);
+                                if (collider.isTrigger)
+                                {
+                                    // FIX: Collateral Layer Damage
+                                    // Only move to 'Ignore Raycast' (Layer 2) if the GameObject doesn't have physical colliders
+                                    bool hasPhysicalCollider = false;
+                                    foreach (var c in collider.gameObject.GetComponents<Collider>())
+                                    {
+                                        if (!c.isTrigger) { hasPhysicalCollider = true; break; }
+                                    }
+
+                                    if (!hasPhysicalCollider)
+                                    {
+                                        collider.gameObject.layer = 2;
+                                    }
+
+                                    if (collider is SphereCollider sc) sc.radius = config.Radius.Value;
+                                    else if (collider is CapsuleCollider cc) cc.radius = config.Radius.Value;
+                                    else if (collider is BoxCollider bc) bc.size = new Vector3(config.Radius.Value * 2, config.Radius.Value * 2, config.Radius.Value * 2);
+                                }
                             }
                         }
+                        
+                        break; 
                     }
                 }
             }
-            catch (Exception) { }
+            catch (Exception ex)
+            {
+                // Never leave this empty! If something breaks, you want to know about it.
+                Plugin.Log.LogError($"[NavalBuffetMod] Error in Rearmer RearmingCheck Patch: {ex}");
+            }
         }
     }
 
@@ -135,6 +142,6 @@ namespace NavalBuffetMod
     {
         public const string PLUGIN_GUID = "com.user.navalbuffetmod";
         public const string PLUGIN_NAME = "NavalBuffetMod";
-        public const string PLUGIN_VERSION = "1.2.0";
+        public const string PLUGIN_VERSION = "1.3.2";
     }
 }
