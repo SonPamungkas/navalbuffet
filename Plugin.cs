@@ -17,6 +17,7 @@ namespace NavalBuffetMod
         {
             public ConfigEntry<bool> Replenishable;
             public ConfigEntry<float> Radius;
+            public ConfigEntry<int> TriggerLayer;
         }
 
         public static Dictionary<string, ContainerConfig> Configs = new Dictionary<string, ContainerConfig>();
@@ -32,14 +33,15 @@ namespace NavalBuffetMod
                 Configs[target] = new ContainerConfig
                 {
                     Replenishable = Config.Bind(target, "Replenishable", true, "Whether the container can be used multiple times without despawning."),
-                    Radius = Config.Bind(target, "Radius", 1000f, "Resupply radius.")
+                    Radius = Config.Bind(target, "Radius", 1000f, "Resupply radius."),
+                    TriggerLayer = Config.Bind(target, "TriggerLayer", 1, "Physics layer for the expanded trigger. 1 = TransparentFX, 2 = IgnoreRaycast, 4 = Water.")
                 };
             }
 
             Harmony harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             harmony.PatchAll();
             
-            Log.LogInfo("Harmony patches applied successfully. Configuration initialized.");
+            Log.LogInfo("NavalBuffetMod initialized. Memory leaks patched.");
         }
     }
 
@@ -58,8 +60,33 @@ namespace NavalBuffetMod
                 {
                     if (objName.Contains(kvp.Key))
                     {
-                        Plugin.Log.LogInfo($"[NavalBuffetMod] New Rearmer detected: '{objName}'. Initializing...");
-                        // We rely on RearmingCheck to apply the initial config values.
+                        var config = kvp.Value;
+                        Plugin.Log.LogInfo($"[NavalBuffetMod] Applying optimized config to spawned Rearmer: '{objName}'");
+                        var traverse = Traverse.Create(__instance);
+                        traverse.Field("singleUse").SetValue(!config.Replenishable.Value);
+                        traverse.Field("range").SetValue(config.Radius.Value);
+                        foreach (var collider in __instance.GetComponentsInChildren<Collider>(true))
+                        {
+                            if (collider.isTrigger)
+                            {
+                                // Apply the layer from config to prevent terrain avoidance without breaking hull detection
+                                collider.gameObject.layer = config.TriggerLayer.Value;
+
+                                if (collider is SphereCollider sc)
+                                {
+                                    sc.radius = config.Radius.Value;
+                                }
+                                else if (collider is CapsuleCollider cc)
+                                {
+                                    cc.radius = config.Radius.Value;
+                                }
+                                else if (collider is BoxCollider bc)
+                                {
+                                    bc.size = new Vector3(config.Radius.Value * 2, config.Radius.Value * 2, config.Radius.Value * 2);
+                                }
+                            }
+                        }
+                        
                         break; 
                     }
                 }
@@ -71,72 +98,6 @@ namespace NavalBuffetMod
         }
     }
 
-    [HarmonyPatch(typeof(Rearmer), "RearmingCheck")]
-    public class Rearmer_RearmingCheck_Patch
-    {
-        static void Prefix(Rearmer __instance)
-        {
-            try
-            {
-                if (__instance == null || __instance.gameObject == null) return;
-                
-                string objName = __instance.gameObject.name;
-                
-                foreach (var kvp in Plugin.Configs)
-                {
-                    if (objName.Contains(kvp.Key))
-                    {
-                        var config = kvp.Value;
-                        var traverse = Traverse.Create(__instance);
-                        
-                        float currentRange = traverse.Field<float>("range").Value;
-                        bool currentSingleUse = traverse.Field<bool>("singleUse").Value;
-                        bool targetSingleUse = !config.Replenishable.Value;
-
-                        // PERFORMANCE OPTIMIZATION: Only perform heavy physical updates if the configuration has changed
-                        // or if this is the first time we're applying it.
-                        if (Mathf.Abs(currentRange - config.Radius.Value) > 0.1f || currentSingleUse != targetSingleUse)
-                        {
-                            Plugin.Log.LogInfo($"[NavalBuffetMod] Updating {objName}: Radius {config.Radius.Value}, Replenishable {config.Replenishable.Value}");
-
-                            traverse.Field("singleUse").SetValue(targetSingleUse);
-                            traverse.Field("range").SetValue(config.Radius.Value);
-
-                            foreach (var collider in __instance.GetComponentsInChildren<Collider>(true))
-                            {
-                                if (collider.isTrigger)
-                                {
-                                    // FIX: Collateral Layer Damage
-                                    // Only move to 'Ignore Raycast' (Layer 2) if the GameObject doesn't have physical colliders
-                                    bool hasPhysicalCollider = false;
-                                    foreach (var c in collider.gameObject.GetComponents<Collider>())
-                                    {
-                                        if (!c.isTrigger) { hasPhysicalCollider = true; break; }
-                                    }
-
-                                    if (!hasPhysicalCollider)
-                                    {
-                                        collider.gameObject.layer = 2;
-                                    }
-
-                                    if (collider is SphereCollider sc) sc.radius = config.Radius.Value;
-                                    else if (collider is CapsuleCollider cc) cc.radius = config.Radius.Value;
-                                    else if (collider is BoxCollider bc) bc.size = new Vector3(config.Radius.Value * 2, config.Radius.Value * 2, config.Radius.Value * 2);
-                                }
-                            }
-                        }
-                        
-                        break; 
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // Never leave this empty! If something breaks, you want to know about it.
-                Plugin.Log.LogError($"[NavalBuffetMod] Error in Rearmer RearmingCheck Patch: {ex}");
-            }
-        }
-    }
 
     public static class PluginInfo
     {
