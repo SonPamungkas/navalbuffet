@@ -167,10 +167,38 @@ namespace NavalBuffetMod
         }
     }
 
+    [HarmonyPatch(typeof(Ship), "CanRearm")]
+    public class Ship_CanRearm_Patch
+    {
+        static void Postfix(Ship __instance, ref bool __result)
+        {
+            if (__result) return;
+
+            try
+            {
+                // If it's a ship and the base game says it doesn't need rearming, double check the weapon stations.
+                // This addresses the "Land Attack Missile" reload exception where the ship doesn't realize it's empty.
+                foreach (var ws in __instance.weaponStations)
+                {
+                    if (ws != null && ws.Ammo < ws.FullAmmo)
+                    {
+                        // Plugin.Log.LogInfo($"[NavalBuffetMod] Ship '{__instance.unitName}' has empty weapon station ({ws.WeaponInfo?.name ?? "Unknown"}). Forcing CanRearm = true.");
+                        __result = true;
+                        return;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[NavalBuffetMod] Error in Ship.CanRearm Patch: {ex}");
+            }
+        }
+    }
+
     public static class PluginInfo
     {
         public const string PLUGIN_GUID = "com.user.navalbuffetmod";
         public const string PLUGIN_NAME = "NavalBuffetMod";
-        public const string PLUGIN_VERSION = "1.5.0";
+        public const string PLUGIN_VERSION = "1.5.1";
     }
 }
