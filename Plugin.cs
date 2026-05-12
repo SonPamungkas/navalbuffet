@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -17,10 +18,25 @@ namespace NavalBuffetMod
         {
             public ConfigEntry<bool> Replenishable;
             public ConfigEntry<float> Radius;
-            public ConfigEntry<int> TriggerLayer;
+            public ConfigEntry<float> CheckInterval; // Throttle setting
         }
 
         public static Dictionary<string, ContainerConfig> Configs = new Dictionary<string, ContainerConfig>();
+
+        // Virtual Trigger
+        public class RearmerData
+        {
+            public bool IsManaged = false;
+            public float LastCheckTime = 0f;
+            public float CheckInterval = 1f;
+            public float Radius = 1000f;
+            
+            // Pre-allocated buffers to prevent Memory Spikes
+            public Collider[] HitBuffer = new Collider[500]; 
+            public HashSet<Collider> KnownColliders = new HashSet<Collider>();
+            public HashSet<Collider> CurrentHits = new HashSet<Collider>();
+        }
+        public static ConditionalWeakTable<Rearmer, RearmerData> RearmerCache = new ConditionalWeakTable<Rearmer, RearmerData>();
 
         private void Awake()
         {
@@ -32,16 +48,16 @@ namespace NavalBuffetMod
             {
                 Configs[target] = new ContainerConfig
                 {
-                    Replenishable = Config.Bind(target, "Replenishable", true, "Whether the container can be used multiple times without despawning."),
+                    Replenishable = Config.Bind(target, "Replenishable", true, "Whether the container can be used multiple times."),
                     Radius = Config.Bind(target, "Radius", 1000f, "Resupply radius."),
-                    TriggerLayer = Config.Bind(target, "TriggerLayer", 1, "Physics layer for the expanded trigger. 1 = TransparentFX, 2 = IgnoreRaycast, 4 = Water.")
+                    CheckInterval = Config.Bind(target, "CheckInterval", 1.0f, "Throttle (in seconds) to prevent memory crashes.")
                 };
             }
 
             Harmony harmony = new Harmony(PluginInfo.PLUGIN_GUID);
             harmony.PatchAll();
             
-            Log.LogInfo("NavalBuffetMod initialized. Memory leaks patched.");
+            Log.LogInfo("NavalBuffetMod initialized. GC-Free Virtual Trigger system engaged.");
         }
     }
 
@@ -61,31 +77,16 @@ namespace NavalBuffetMod
                     if (objName.Contains(kvp.Key))
                     {
                         var config = kvp.Value;
-                        Plugin.Log.LogInfo($"[NavalBuffetMod] Applying optimized config to spawned Rearmer: '{objName}'");
+                        Plugin.Log.LogInfo($"[NavalBuffetMod] Spawning managed Rearmer: '{objName}'.");
+
+                        var data = Plugin.RearmerCache.GetOrCreateValue(__instance);
+                        data.IsManaged = true;
+                        data.CheckInterval = config.CheckInterval.Value;
+                        data.Radius = config.Radius.Value;
+
                         var traverse = Traverse.Create(__instance);
                         traverse.Field("singleUse").SetValue(!config.Replenishable.Value);
                         traverse.Field("range").SetValue(config.Radius.Value);
-                        foreach (var collider in __instance.GetComponentsInChildren<Collider>(true))
-                        {
-                            if (collider.isTrigger)
-                            {
-                                // Apply the layer from config to prevent terrain avoidance without breaking hull detection
-                                collider.gameObject.layer = config.TriggerLayer.Value;
-
-                                if (collider is SphereCollider sc)
-                                {
-                                    sc.radius = config.Radius.Value;
-                                }
-                                else if (collider is CapsuleCollider cc)
-                                {
-                                    cc.radius = config.Radius.Value;
-                                }
-                                else if (collider is BoxCollider bc)
-                                {
-                                    bc.size = new Vector3(config.Radius.Value * 2, config.Radius.Value * 2, config.Radius.Value * 2);
-                                }
-                            }
-                        }
                         
                         break; 
                     }
@@ -98,11 +99,78 @@ namespace NavalBuffetMod
         }
     }
 
+    [HarmonyPatch(typeof(Rearmer), "RearmingCheck")]
+    public class Rearmer_RearmingCheck_Patch
+    {
+        static bool Prefix(Rearmer __instance)
+        {
+            try
+            {
+                if (__instance == null) return true;
+
+                if (Plugin.RearmerCache.TryGetValue(__instance, out Plugin.RearmerData data) && data.IsManaged)
+                {
+                    float currentTime = Time.time;
+                    
+                    if (currentTime - data.LastCheckTime < data.CheckInterval)
+                    {
+                        return false; 
+                    }
+
+                    data.LastCheckTime = currentTime;
+
+                    
+                    data.CurrentHits.Clear();
+                    int hitCount = Physics.OverlapSphereNonAlloc(__instance.transform.position, data.Radius, data.HitBuffer, Physics.AllLayers, QueryTriggerInteraction.Ignore);
+                    
+                    
+                    for (int i = 0; i < hitCount; i++)
+                    {
+                        Collider hit = data.HitBuffer[i];
+                        if (hit == null) continue;
+                        
+                        data.CurrentHits.Add(hit);
+
+                        if (!data.KnownColliders.Contains(hit))
+                        {
+                            __instance.gameObject.SendMessage("OnTriggerEnter", hit, SendMessageOptions.DontRequireReceiver);
+                            data.KnownColliders.Add(hit);
+                        }
+                        else
+                        {
+                            __instance.gameObject.SendMessage("OnTriggerStay", hit, SendMessageOptions.DontRequireReceiver);
+                        }
+                    }
+
+                    data.KnownColliders.RemoveWhere(known => 
+                    {
+                        if (known == null || !data.CurrentHits.Contains(known))
+                        {
+                            if (known != null)
+                            {
+                                __instance.gameObject.SendMessage("OnTriggerExit", known, SendMessageOptions.DontRequireReceiver);
+                            }
+                            return true; // Removes from KnownColliders
+                        }
+                        return false;
+                    });
+
+                    return true;
+                }
+
+                return true;
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+        }
+    }
 
     public static class PluginInfo
     {
         public const string PLUGIN_GUID = "com.user.navalbuffetmod";
         public const string PLUGIN_NAME = "NavalBuffetMod";
-        public const string PLUGIN_VERSION = "1.3.2";
+        public const string PLUGIN_VERSION = "1.5.0";
     }
 }
