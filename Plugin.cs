@@ -18,7 +18,8 @@ namespace NavalBuffetMod
         {
             public ConfigEntry<bool> Replenishable;
             public ConfigEntry<float> Radius;
-            public ConfigEntry<float> CheckInterval; // Throttle setting
+            public ConfigEntry<float> CheckInterval; 
+            public ConfigEntry<float> UnitCooldown; // Per-unit replenishment cooldown
         }
 
         public static Dictionary<string, ContainerConfig> Configs = new Dictionary<string, ContainerConfig>();
@@ -30,6 +31,7 @@ namespace NavalBuffetMod
             public float LastCheckTime = 0f;
             public float CheckInterval = 1f;
             public float Radius = 1000f;
+            public float UnitCooldown = 10f; // Cached from config
             
             // Pre-allocated buffers to prevent Memory Spikes
             public Collider[] HitBuffer = new Collider[500]; 
@@ -37,12 +39,19 @@ namespace NavalBuffetMod
             public HashSet<Collider> CurrentHits = new HashSet<Collider>();
         }
         public static ConditionalWeakTable<Rearmer, RearmerData> RearmerCache = new ConditionalWeakTable<Rearmer, RearmerData>();
+        
+        // Tracks when each individual unit was last replenished (globally across all rearmers)
+        public static ConditionalWeakTable<Unit, StrongBox<float>> UnitLastReplenishTime = new ConditionalWeakTable<Unit, StrongBox<float>>();
 
         private void Awake()
         {
             Log = Logger;
             
-            string[] targets = { "MunitionsContainer1", "MunitionsPallet1", "NavalSupplyContainer1", "NavalPallet1" };
+            string[] targets = { 
+                "MunitionsContainer1", "MunitionsPallet1", 
+                "NavalSupplyContainer1", "NavalPallet1", 
+                "AmmunitionBunker1", "AmmoDump1" 
+            };
             
             foreach (var target in targets)
             {
@@ -50,7 +59,8 @@ namespace NavalBuffetMod
                 {
                     Replenishable = Config.Bind(target, "Replenishable", true, "Whether the container can be used multiple times."),
                     Radius = Config.Bind(target, "Radius", 1000f, "Resupply radius."),
-                    CheckInterval = Config.Bind(target, "CheckInterval", 1.0f, "Throttle (in seconds) to prevent memory crashes.")
+                    CheckInterval = Config.Bind(target, "CheckInterval", 1.0f, "Throttle (in seconds) to prevent memory crashes."),
+                    UnitCooldown = Config.Bind(target, "UnitCooldown", 30f, "Individual unit replenishment cooldown (in seconds) to prevent nonstop firing.")
                 };
             }
 
@@ -83,6 +93,7 @@ namespace NavalBuffetMod
                         data.IsManaged = true;
                         data.CheckInterval = config.CheckInterval.Value;
                         data.Radius = config.Radius.Value;
+                        data.UnitCooldown = config.UnitCooldown.Value;
 
                         var traverse = Traverse.Create(__instance);
                         traverse.Field("singleUse").SetValue(!config.Replenishable.Value);
@@ -128,6 +139,19 @@ namespace NavalBuffetMod
                     {
                         Collider hit = data.HitBuffer[i];
                         if (hit == null) continue;
+
+                        Unit unit = hit.GetComponentInParent<Unit>();
+                        if (unit != null)
+                        {
+                            // Check if unit is on cooldown
+                            if (Plugin.UnitLastReplenishTime.TryGetValue(unit, out var lastTimeBox))
+                            {
+                                if (currentTime - lastTimeBox.Value < data.UnitCooldown)
+                                {
+                                    continue; // Unit is still on cooldown
+                                }
+                            }
+                        }
                         
                         data.CurrentHits.Add(hit);
 
@@ -195,10 +219,37 @@ namespace NavalBuffetMod
         }
     }
 
+    [HarmonyPatch(typeof(Ship), "Rearm")]
+    public class Ship_Rearm_Timer_Patch
+    {
+        static void Postfix(Ship __instance)
+        {
+            Plugin.UnitLastReplenishTime.GetOrCreateValue(__instance).Value = Time.time;
+        }
+    }
+
+    [HarmonyPatch(typeof(Aircraft), "Rearm")]
+    public class Aircraft_Rearm_Timer_Patch
+    {
+        static void Postfix(Aircraft __instance)
+        {
+            Plugin.UnitLastReplenishTime.GetOrCreateValue(__instance).Value = Time.time;
+        }
+    }
+
+    [HarmonyPatch(typeof(GroundVehicle), "Rearm")]
+    public class GroundVehicle_Rearm_Timer_Patch
+    {
+        static void Postfix(GroundVehicle __instance)
+        {
+            Plugin.UnitLastReplenishTime.GetOrCreateValue(__instance).Value = Time.time;
+        }
+    }
+
     public static class PluginInfo
     {
         public const string PLUGIN_GUID = "com.user.navalbuffetmod";
         public const string PLUGIN_NAME = "NavalBuffetMod";
-        public const string PLUGIN_VERSION = "1.5.1";
+        public const string PLUGIN_VERSION = "1.6.0";
     }
 }

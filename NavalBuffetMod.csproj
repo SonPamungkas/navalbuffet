@@ -17,6 +17,9 @@
       <HintPath>..\game\Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="Mirage">
+      <HintPath>..\game\Mirage.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
 </Project>
